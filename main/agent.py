@@ -41,7 +41,7 @@ def planner_node(state: AgentState):
     messages = state["messages"]
     tools = state["available_tools"]
     
-    # Bind tools yang tersedia saat ini ke LLM
+    # Bind the currently available tools to the LLM
     llm_with_tools = llm.bind_tools(tools)
     
     system_prompt = SystemMessage(content=(
@@ -56,7 +56,7 @@ def planner_node(state: AgentState):
     response = llm_with_tools.invoke([system_prompt] + messages)
     return {"messages": [response]}
 
-# --- 4. FILTER GUARDRAIL AST (PENGAMAN) ---
+# --- 4. AST GUARDRAIL (SAFETY BARRIER) ---
 FORBIDDEN_MODULES = {"os", "sys", "subprocess", "shutil", "socket", "requests", "urllib", "pathlib"}
 FORBIDDEN_BUILTINS = {"eval", "exec", "open", "__import__", "compile"}
 
@@ -70,22 +70,22 @@ def validate_code_safety(code_str: str) -> tuple[bool, str]:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 if alias.name.split('.')[0] in FORBIDDEN_MODULES:
-                    return False, f"Dilarang import modul: {alias.name}"
+                    return False, f"import of modules is prohibited: {alias.name}"
         elif isinstance(node, ast.ImportFrom):
             if node.module and node.module.split('.')[0] in FORBIDDEN_MODULES:
-                return False, f"Dilarang import dari: {node.module}"
+                return False, f"Imports prohibited from: {node.module}"
         elif isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_BUILTINS:
-                return False, f"Dilarang panggil fungsi: {node.func.id}()"
-    return True, "Aman"
+                return False, f"Calling functions is prohibited: {node.func.id}()"
+    return True, "Safe"
 
-# --- 5. TOOL MAKER NODE DENGAN PENYIMPANAN PERMANEN ---
+# --- 5. NODE TOOL MAKER WITH PERMANENT STORAGE ---
 def persistent_tool_maker_node(state: AgentState):
-    print("--- [Tool Maker] Membuat Tool Baru & Menyimpannya ke File... ---")
+    print("--- [Tool Maker] Creating a New Tool and Saving It to a File... ---")
     messages = state["messages"]
     last_message = messages[-1]
     
-    # 1. Minta LLM membuat kode fungsi Python lengkap dengan dekorator @tool
+    # 1. Ask an LLM to generate Python function code that includes the @tool decorator.
     maker_prompt = SystemMessage(content=(
         "You are an expert Python developer."
         "Write a clean Python function using the @tool decorator from langchain_core.tools."
@@ -96,53 +96,53 @@ def persistent_tool_maker_node(state: AgentState):
     response = llm.invoke([maker_prompt, HumanMessage(content=f"Create a tool for: {last_message.content}")])
     generated_code = response.content.strip()
     
-    # Bersihkan markdown jika LLM tak sengaja menyertainya (` ```python ... ``` `)
+    # Clean up any markdown if the LLM inadvertently includes it (e.g., ` ```python ... ``` `)
     if generated_code.startswith("```"):
         generated_code = generated_code.split("```")[1]
         if generated_code.startswith("python"):
             generated_code = generated_code[6:].strip()
             
-    # 2. Filter / Validasi Keamanan AST
+    # 2. AST Security Filter / Validation
     is_safe, msg = validate_code_safety(generated_code)
     if not is_safe:
-        print(f"[SECURITY REJECTED] Kode ditolak karena alasan keamanan: {msg}")
-        return {"messages": [AIMessage(content=f"Pembuatan tool ditolak oleh sistem keamanan: {msg}")]}
+        print(f"[SECURITY REJECTED] Code rejected for security reasons: {msg}")
+        return {"messages": [AIMessage(content=f"Tool creation was blocked by the security system: {msg}")]}
     
-    # 3. Simpan secara permanen ke file 'tools.py'
+    # 3. Save permanently to the file 'tools.py'
     try:
         with open("tools.py", "a", encoding="utf-8") as f:
             f.write(f"\n\n{generated_code}\n")
-        print("[Tool Maker] Berhasil menambahkan tool baru ke file 'tools.py'!")
+        print("[Tool Maker] Successfully added a new tool to the file 'tools.py'!")
         
-        # 4. Hot-Reload modul 'tools' agar agen bisa langsung memakainya tanpa restart program
+        # 4. Hot-reload the 'tools' module so that the agent can use it immediately without restarting the program
         importlib.reload(tools)
         
-        # Ambil ulang semua fungsi tool yang ada di file tools.py yang telah diperbarui
+        # Retrieve all tool functions from the updated tools.py file.
         updated_tools_list = [
             obj for name, obj in inspect.getmembers(tools, inspect.isfunction) 
-            if hasattr(obj, "tool") or hasattr(obj, "args_schema") # Sesuaikan dengan dekorator LangChain
+            if hasattr(obj, "tool") or hasattr(obj, "args_schema") # Adjust to the LangChain decorator
         ]
         
         return {"available_tools": updated_tools_list}
         
     except Exception as e:
-        print(f"Gagal menyimpan ke file: {e}")
-        return {"messages": [AIMessage(content=f"Gagal menyimpan tool ke file: {e}")]}
+        print(f"Failed to save to file: {e}")
+        return {"messages": [AIMessage(content=f"Failed to save tool to file: {e}")]}
 
 def refresh_available_tools() -> list:
     """
-    Memindai file tools.py secara otomatis untuk mengambil 
-    semua fungsi yang berstatus sebagai tool.
+    Automatically scan the tools.py file to retrieve
+    all functions that are designated as tools.
     """
-    # 1. Reload modul agar memuat kode terbaru dari file fisik
+    # 1. Reload the module to load the latest code from the physical file
     importlib.reload(tools)
     
     refreshed_tools = []
     
-    # 2. Ambil semua anggota (fungsi/variabel) di dalam modul tools.py
+    # 2. Import all members (functions/variables) from the tools.py module.
     for name, obj in inspect.getmembers(tools, inspect.isfunction):
-        # Cek apakah objek tersebut adalah tool LangChain 
-        # (biasanya memiliki atribut 'tool_call' atau merupakan instance BaseTool)
+        # Check whether the object is a LangChain tool
+        # (it typically has a 'tool_call' attribute or is an instance of BaseTool)
         if hasattr(obj, "name") and hasattr(obj, "invoke"):
             refreshed_tools.append(obj)
             
@@ -150,9 +150,9 @@ def refresh_available_tools() -> list:
 
 def execution_node(state: AgentState):
     """
-    Node Eksekutor: Menjalankan call tool yang diminta oleh Planner.
+    Executor Node: Executes the tool calls requested by the Planner.
     """
-    print("--- [Eksekutor] Menjalankan Tool... ---")
+    print("--- [Eksekutor] Running Tool... ---")
     messages = state["messages"]
     last_message = messages[-1]
     tools = state["available_tools"]
@@ -161,13 +161,13 @@ def execution_node(state: AgentState):
     tool_name = tool_call["name"]
     tool_args = tool_call["args"]
     
-    # Cari fungsi tool berdasarkan nama
+    # Find tool function by name
     chosen_tool = next((t for t in tools if t.name == tool_name), None)
     
     if chosen_tool:
         result = chosen_tool.invoke(tool_args)
         print(f"[Eksekutor] Hasil {tool_name}({tool_args}): {result}")
-        # Kembalikan sebagai AIMessage dengan tool_call_id
+        # Return as an AIMessage with a tool_call_id
         return {"messages": [AIMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_name)]}
     else:
         return {"messages": [AIMessage(content=f"Error: Tool '{tool_name}' not found.", tool_call_id=tool_call["id"])]}
