@@ -79,6 +79,25 @@ def validate_code_safety(code_str: str) -> tuple[bool, str]:
                 return False, f"Calling functions is prohibited: {node.func.id}()"
     return True, "Safe"
 
+def refresh_available_tools() -> list:
+    """
+    Automatically scan the tools.py file to retrieve
+    all functions that are designated as tools.
+    """
+    # 1. Reload the module to load the latest code from the physical file
+    importlib.reload(tools)
+    
+    refreshed_tools = []
+    
+    # 2. Import all members (functions/variables) from the tools.py module.
+    for name, obj in inspect.getmembers(tools, inspect.isfunction):
+        # Check whether the object is a LangChain tool
+        # (it typically has a 'tool_call' attribute or is an instance of BaseTool)
+        if hasattr(obj, "name") and hasattr(obj, "invoke"):
+            refreshed_tools.append(obj)
+            
+    return refreshed_tools
+
 # --- 5. NODE TOOL MAKER WITH PERMANENT STORAGE ---
 def persistent_tool_maker_node(state: AgentState):
     print("--- [Tool Maker] Creating a New Tool and Saving It to a File... ---")
@@ -114,39 +133,14 @@ def persistent_tool_maker_node(state: AgentState):
             f.write(f"\n\n{generated_code}\n")
         print("[Tool Maker] Successfully added a new tool to the file 'tools.py'!")
         
-        # 4. Hot-reload the 'tools' module so that the agent can use it immediately without restarting the program
-        importlib.reload(tools)
-        
         # Retrieve all tool functions from the updated tools.py file.
-        updated_tools_list = [
-            obj for name, obj in inspect.getmembers(tools, inspect.isfunction) 
-            if hasattr(obj, "tool") or hasattr(obj, "args_schema") # Adjust to the LangChain decorator
-        ]
+        updated_tools_list = refresh_available_tools
         
         return {"available_tools": updated_tools_list}
         
     except Exception as e:
         print(f"Failed to save to file: {e}")
         return {"messages": [AIMessage(content=f"Failed to save tool to file: {e}")]}
-
-def refresh_available_tools() -> list:
-    """
-    Automatically scan the tools.py file to retrieve
-    all functions that are designated as tools.
-    """
-    # 1. Reload the module to load the latest code from the physical file
-    importlib.reload(tools)
-    
-    refreshed_tools = []
-    
-    # 2. Import all members (functions/variables) from the tools.py module.
-    for name, obj in inspect.getmembers(tools, inspect.isfunction):
-        # Check whether the object is a LangChain tool
-        # (it typically has a 'tool_call' attribute or is an instance of BaseTool)
-        if hasattr(obj, "name") and hasattr(obj, "invoke"):
-            refreshed_tools.append(obj)
-            
-    return refreshed_tools
 
 def execution_node(state: AgentState):
     """
@@ -166,39 +160,39 @@ def execution_node(state: AgentState):
     
     if chosen_tool:
         result = chosen_tool.invoke(tool_args)
-        print(f"[Eksekutor] Hasil {tool_name}({tool_args}): {result}")
+        print(f"[Eksekutor] Result {tool_name}({tool_args}): {result}")
         # Return as an AIMessage with a tool_call_id
         return {"messages": [AIMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_name)]}
     else:
         return {"messages": [AIMessage(content=f"Error: Tool '{tool_name}' not found.", tool_call_id=tool_call["id"])]}
 
-# --- 6. DEFENISI LOGIKA PENGARAH (ROUTER) ---
+# --- 6. DEFINITION OF DIRECTION LOGIC (ROUTER) ---
 
 def router(state: AgentState):
     messages = state["messages"]
     last_message = messages[-1]
     
-    # 1. Jika Planner meminta panggil tool
+    # 1. If Planner asks call the tool
     if last_message.tool_calls:
         return "call_tool"
     
-    # 2. Jika Planner secara eksplisit meminta buat tool baru dalam teksnya
+    # 2. If Planner explicitly asks to create a new tool in its text
     if "new tool" in last_message.content.lower() or "create a tool" in last_message.content.lower():
         return "make_tool"
     
-    # 3. Jika tidak ada tindakan lanjutan, akhiri percakapan
+    # 3. If no further action is taken, end the conversation
     return END
 
-# --- 6. MEMBANGUN GRAPH (LANGGRAPH) ---
+# --- 6. BUILDING A GRAPH (LANGGRAPH) ---
 
 workflow = StateGraph(AgentState)
 
-# Tambahkan Node
+# add nodes
 workflow.add_node("planner", planner_node)
 workflow.add_node("tool_maker", persistent_tool_maker_node)
 workflow.add_node("executor", execution_node)
 
-# Tentukan Alur Kontrol (Edges & Routers)
+# Define Control Flow (Edges and Routers)
 workflow.set_entry_point("planner")
 
 workflow.add_conditional_edges(
@@ -211,56 +205,56 @@ workflow.add_conditional_edges(
     }
 )
 
-# Setelah membuat tool, kembali ke Planner untuk mengevaluasi ulang
+# After creating the tool, return to Planner to re-evaluate
 workflow.add_edge("tool_maker", "planner")
-# Setelah menjalankan tool, kembali ke Planner untuk merangkum jawaban
+# After running the tool, return to Planner to summarize the answers
 workflow.add_edge("executor", "planner")
 
 # Compile Graph
 app = workflow.compile()
 
-# --- 7. PENGUJIAN AGEN ---
+# --- 7. STARTING THE AGENT ---
 
 if __name__ == "__main__":
-    print("\n=== MEMULAI AGEN MATEMATIKA ADAPTIF & INTERAKTIF ===\n")
-    print("Ketik pertanyaan matematika (contoh: 'Berapa 10 ditambah 5' atau '15 dikurangi 7').")
-    print("Ketik 'exit' atau 'keluar' untuk berhenti.\n")
+    print("\n=== GETTING STARTED WITH AN ADAPTIVE AND INTERACTIVE MATHEMATICS AGENT ===\n")
+    print("Type a math question (example: 'What is 10 plus 5' or '15 minus 7').")
+    print("Type 'exit' or 'done' to stop.\n")
     
-    # 1. Inisialisasi state awal dengan memuat semua tool dari file tools.py secara otomatis
+    # 1. Initialize the initial state by loading all tools from the tools.py file automatically
     current_state = {
         "messages": [],
         "available_tools": refresh_available_tools()
     }
     
-    # 2. Perulangan interaktif untuk menerima input pengguna
+    # 2. Interactive loop to accept user input
     while True:
         try:
             user_input = input("\nUser: ").strip()
             
-            if user_input.lower() in ["exit", "keluar"]:
-                print("Keluar dari program. Sampai jumpa!")
+            if user_input.lower() in ["exit", "done"]:
+                print("Exit the program. See you!")
                 break
                 
             if not user_input:
                 continue
                 
-            # Tambahkan pesan baru dari pengguna ke dalam riwayat messages di state
+            # Add new messages from users to the messages history in the state
             current_state["messages"].append(HumanMessage(content=user_input))
             
-            # Jalankan graph secara utuh. 
-            # Agen (Planner) akan otomatis memutuskan apakah pakai tool lama, buat tool baru, atau langsung menjawab.
-            print("\n--- [Sistem] Agen sedang memproses... ---")
+            # Run the graph in its entirety. 
+            # The agent (Planner) will automatically decide whether to use the old tool, create a new tool, or answer directly.
+            print("\n--- [Sistem] The Agent is processing... ---")
             current_state = app.invoke(current_state)
             
-            # Ambil jawaban terakhir dari agen
+            # Take the final answer from the agent
             final_response = current_state["messages"][-1].content
             print(f"\nAI Agent: {final_response}")
             
-            # Perbarui daftar tool di state (jika node tool_maker sempat menambahkan tool baru ke tools.py)
+            # Update tool list in state (if node tool_maker has time to add new tools to tools.py)
             current_state["available_tools"] = refresh_available_tools()
             
         except KeyboardInterrupt:
-            print("\nProgram dihentikan oleh pengguna.")
+            print("\nThe program was terminated by the user.")
             break
         except Exception as e:
-            print(f"\nTerjadi error: {e}")
+            print(f"\nAn error occurred: {e}")
