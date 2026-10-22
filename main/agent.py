@@ -14,7 +14,7 @@ from typing import Annotated, TypedDict, Union, List, Callable, Any
 from langchain_google_genai import ChatGoogleGenerativeAI
 # from langchain_google_genai._function_utils import convert_to_genai_function_declarations
 
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage
+from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage, RemoveMessage
 from langchain_core.tools import tool, BaseTool
 from langgraph.graph import StateGraph, END
 
@@ -30,6 +30,37 @@ class AgentState(TypedDict):
     messages: Annotated[List[BaseMessage], operator.add]
     # Saving a dynamic list of equipment
     available_tools: List[Callable]
+
+def summarize_and_clean_state(state: AgentState):
+    print("--- [Summarizer] Summarizing the completed text and clearing the state... ---")
+    messages = state["messages"]
+    
+    if not messages:
+        return state
+
+    # 1. Ask the LLM to generate a summary of the current task conversation.
+    summary_prompt = [
+        SystemMessage(content="Provide a concise and compact summary of the mathematical conversation/task below, covering the user's question, the tool(s) created or used, and the final result."),
+    ] + messages
+    
+    summary_response = llm.invoke(summary_prompt)
+    task_summary = summary_response.content
+    
+    # 2. Save the summary permanently to a .txt file
+    with open("task_history.txt", "a", encoding="utf-8") as f:
+        f.write(f"\n--- Task Summary ---\n{task_summary}\n")
+    print("[Summarizer] Summary successfully saved to 'task_history.txt'")
+    
+    # 3. Create a command to delete the entire history of old messages in the LangGraph state
+    # Use RemoveMessage for each existing message ID
+    delete_messages = [RemoveMessage(id=msg.id) for msg in messages if hasattr(msg, "id") and msg.id]
+    
+    # 4. (Optional) Insert the aforementioned summary as a new SystemMessage so that the agent retains global context.
+    summary_memory_message = SystemMessage(content=f"Previous task history: {task_summary}")
+    
+    return {
+        "messages": delete_messages + [summary_memory_message]
+    }
 
 # --- 3. DEFINITION OF ALL NODE AGENTS ---
 
@@ -172,12 +203,20 @@ def router(state: AgentState):
     messages = state["messages"]
     last_message = messages[-1]
     
-    # 1. If Planner asks call the tool
+    # 1. If the Planner calls a tool
     if last_message.tool_calls:
         return "call_tool"
     
-    # 2. If Planner explicitly asks to create a new tool in its text
-    if "new tool" in last_message.content.lower() or "create a tool" in last_message.content.lower():
+    # Retrieve content safely (can be a string or a list)
+    content = last_message.content
+    if isinstance(content, list):
+        # If it is a list (e.g., a content block), combine the text into a string.
+        content_str = "".join([item.get("text", "") for item in content if isinstance(item, dict)])
+    else:
+        content_str = str(content)
+    
+    # 2. If the Planner explicitly wishes to create a new tool within their text
+    if "new tool" in content_str.lower() or "create a tool" in content_str.lower():
         return "make_tool"
     
     # 3. If no further action is taken, end the conversation
@@ -250,7 +289,8 @@ if __name__ == "__main__":
             final_response = current_state["messages"][-1].content
             print(f"\nAI Agent: {final_response}")
             
-            # Update tool list in state (if node tool_maker has time to add new tools to tools.py)
+            # Update memory and tool list
+            current_state["messages"] = summarize_and_clean_state(current_state)["messages"]
             current_state["available_tools"] = refresh_available_tools()
             
         except KeyboardInterrupt:
