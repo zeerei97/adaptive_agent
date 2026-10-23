@@ -64,6 +64,29 @@ def summarize_and_clean_state(state: AgentState):
 
 # --- 3. DEFINITION OF ALL NODE AGENTS ---
 
+def input_filter_node(state: AgentState):
+    print("--- [Input Filter] Checking the relevance of user input... ---")
+    messages = state["messages"]
+    last_message = messages[-1]
+    
+    # Specialized prompt for rapid classification
+    filter_prompt = SystemMessage(content=(
+        "You are a strict security and domain filter for a specialized Mathematics Agent. "
+        "Analyze the user's input. Is it related to mathematics, numbers, calculations, arithmetic, algebra, geometry, or asking for a math tool? "
+        "Answer ONLY with 'YES' if it is math-related, or 'NO' if it is completely unrelated (like general knowledge, coding unrelated to math, creative writing, personal chat, etc.)."
+    ))
+    
+    response = llm.invoke([filter_prompt, last_message])
+    decision = response.content.strip().upper()
+    
+    if "NO" in decision:
+        # If it is not a match, provide a polite response directly within the state.
+        polite_reply = AIMessage(content="Sorry, I am a specialized mathematics agent that can only assist with answering math-related questions or calculations. Please feel free to ask any questions about mathematics!")
+        return {"messages": [polite_reply]}
+    
+    # If YES, allow the user's message to continue being processed by the planner (do not modify the messages)
+    return {}
+
 def planner_node(state: AgentState):
     """
     Brain Nodes: Analyze requests, select tools, or decide to create new tools.
@@ -74,14 +97,12 @@ def planner_node(state: AgentState):
     
     # Bind the currently available tools to the LLM
     llm_with_tools = llm.bind_tools(tools)
-    
     system_prompt = SystemMessage(content=(
-        "You are an advanced mathematical AI agent."
-        "You have access to a set of dynamic tools."
-        "Analyze the user's mathematical request."
-        "If a suitable tool exists, call it."
-        "If you do NOT have a tool to solve the specific operation (e.g., subtraction, multiplication),"
-        "explicitly state that you need a new tool made, describing what the tool should do."
+    "You are an expert mathematical planning agent. "
+    "Your sole objective is to solve the user's validated math problem efficiently. "
+    "1. Check the available tools first. If a suitable tool exists, call it immediately. "
+    "2. If a required tool does not exist, you MUST explicitly output the phrase 'create a tool' so the system can build it. "
+    "3. Never perform calculations manually if a tool can be utilized or created."
     ))
     
     response = llm_with_tools.invoke([system_prompt] + messages)
@@ -199,40 +220,94 @@ def execution_node(state: AgentState):
 
 # --- 6. DEFINITION OF DIRECTION LOGIC (ROUTER) ---
 
+def filter_router(state: AgentState):
+    # Check the last message. If the message is a rejection from a filter, proceed directly to END.
+    last_message = state["messages"][-1]
+    
+    # If the last message contains our rejection statement, direct to END.
+    if "Sorry, I am a mathematics agent." in last_message.content:
+        return END
+        
+    return "proceed_to_planner"
+
 def router(state: AgentState):
     messages = state["messages"]
     last_message = messages[-1]
     
-    # 1. If the Planner calls a tool
     if last_message.tool_calls:
         return "call_tool"
     
-    # Retrieve content safely (can be a string or a list)
+    # Retrieve content securely
     content = last_message.content
     if isinstance(content, list):
-        # If it is a list (e.g., a content block), combine the text into a string.
         content_str = "".join([item.get("text", "") for item in content if isinstance(item, dict)])
     else:
         content_str = str(content)
+        
+    content_lower = content_str.lower()
     
-    # 2. If the Planner explicitly wishes to create a new tool within their text
-    if "new tool" in content_str.lower() or "create a tool" in content_str.lower():
+    # Expand keywords for tool creation detection
+    keywords = ["new tool", "create a tool", "need a tool", "missing tool", "tool needed"]
+    if any(kw in content_lower for kw in keywords):
         return "make_tool"
-    
-    # 3. If no further action is taken, end the conversation
+        
     return END
+
+def post_processor_node(state: AgentState):
+    print("--- [Post-Processor] Tidying up the final answer & securing the memory... ---")
+    messages = state["messages"]
+    
+    # Take the final raw result (from the executor or planner)
+    last_message = messages[-1]
+    raw_content = last_message.content
+    
+    # 1. Format the answer so that it is neat and easy for the user to read.
+    formatting_prompt = SystemMessage(content=(
+        "You are a helpful mathematical assistant. "
+        "Take the raw result/answer and format it into a clean, professional, and clear final response for the user. "
+        "Keep it concise and direct."
+    ))
+    
+    format_response = llm.invoke([formatting_prompt, AIMessage(content=str(raw_content))])
+    clean_answer = format_response.content
+    
+    # Create a message with clean
+    final_ai_message = AIMessage(content=clean_answer)
+    
+    # Add the cleaned message to the state so that it can be read by the summarizer function.
+    state["messages"].append(final_ai_message)
+    
+    # 2 & 3. Execute the `summarize_and_clean_state` function for .txt archives and reset the message state.
+    cleanup_result = summarize_and_clean_state(state)
+    
+    # Return a clean message to the state so that the terminal can display the final answer to the user.
+    return {
+        "messages": cleanup_result["messages"] + [final_ai_message]
+    }
 
 # --- 6. BUILDING A GRAPH (LANGGRAPH) ---
 
 workflow = StateGraph(AgentState)
 
 # add nodes
+workflow.add_node("input_filter", input_filter_node)
 workflow.add_node("planner", planner_node)
 workflow.add_node("tool_maker", persistent_tool_maker_node)
 workflow.add_node("executor", execution_node)
+workflow.add_node("post_processor", post_processor_node)
 
-# Define Control Flow (Edges and Routers)
-workflow.set_entry_point("planner")
+# Hubungkan entry point ke input_filter
+workflow.set_entry_point("input_filter")
+
+# Tambahkan conditional edge dari input_filter
+workflow.add_conditional_edges(
+    "input_filter",
+    filter_router,
+    {
+        "proceed_to_planner": "planner",
+        END: END
+    }
+)
 
 workflow.add_conditional_edges(
     "planner",
@@ -247,7 +322,8 @@ workflow.add_conditional_edges(
 # After creating the tool, return to Planner to re-evaluate
 workflow.add_edge("tool_maker", "planner")
 # After running the tool, return to Planner to summarize the answers
-workflow.add_edge("executor", "planner")
+workflow.add_edge("executor", "post_processor")
+workflow.add_edge("post_processor", END)
 
 # Compile Graph
 app = workflow.compile()
@@ -281,16 +357,14 @@ if __name__ == "__main__":
             current_state["messages"].append(HumanMessage(content=user_input))
             
             # Run the graph in its entirety. 
-            # The agent (Planner) will automatically decide whether to use the old tool, create a new tool, or answer directly.
             print("\n--- [Sistem] The Agent is processing... ---")
             current_state = app.invoke(current_state)
             
-            # Take the final answer from the agent
+            # Take the final answer from the agent safely
             final_response = current_state["messages"][-1].content
             print(f"\nAI Agent: {final_response}")
             
-            # Update memory and tool list
-            current_state["messages"] = summarize_and_clean_state(current_state)["messages"]
+            # Update tool list in state (jika ada tool baru yang dibuat oleh tool_maker)
             current_state["available_tools"] = refresh_available_tools()
             
         except KeyboardInterrupt:
