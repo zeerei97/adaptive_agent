@@ -77,7 +77,16 @@ def input_filter_node(state: AgentState):
     ))
     
     response = llm.invoke([filter_prompt, last_message])
-    decision = response.content.strip().upper()
+    
+    # Ambil content dengan aman (bisa string atau list)
+    content = response.content
+    if isinstance(content, list):
+        # Gabungkan teks jika berupa list blok konten
+        response_str = "".join([item.get("text", "") for item in content if isinstance(item, dict)])
+    else:
+        response_str = str(content)
+        
+    decision = response_str.strip().upper()
     
     if "NO" in decision:
         # If it is not a match, provide a polite response directly within the state.
@@ -254,37 +263,55 @@ def router(state: AgentState):
     return END
 
 def post_processor_node(state: AgentState):
-    print("--- [Post-Processor] Tidying up the final answer & securing the memory... ---")
+    print("--- [Post-Processor] Merapikan jawaban akhir & mengamankan memori... ---")
     messages = state["messages"]
     
-    # Take the final raw result (from the executor or planner)
+    # Ambil hasil mentah terakhir dengan aman
     last_message = messages[-1]
     raw_content = last_message.content
     
-    # 1. Format the answer so that it is neat and easy for the user to read.
+    # Ekstrak teks mentah jika berbentuk list
+    if isinstance(raw_content, list):
+        raw_text = "".join([item.get("text", "") for item in raw_content if isinstance(item, dict)])
+    else:
+        raw_text = str(raw_content)
+        
+    # Fallback jika raw_text kosong
+    if not raw_text.strip():
+        raw_text = "Task selesai."
+    
+    # 1. Rapikan jawaban agar bersih
     formatting_prompt = SystemMessage(content=(
         "You are a helpful mathematical assistant. "
         "Take the raw result/answer and format it into a clean, professional, and clear final response for the user. "
         "Keep it concise and direct."
     ))
     
-    format_response = llm.invoke([formatting_prompt, AIMessage(content=str(raw_content))])
-    clean_answer = format_response.content
+    format_response = llm.invoke([formatting_prompt, AIMessage(content=raw_text)])
     
-    # Create a message with clean
+    # Ekstrak hasil format dengan aman
+    clean_content = format_response.content
+    if isinstance(clean_content, list):
+        clean_answer = "".join([item.get("text", "") for item in clean_content if isinstance(item, dict)])
+    else:
+        clean_answer = str(clean_content)
+        
+    # Jika hasil format dari LLM kosong, gunakan raw_text sebagai cadangan
+    if not clean_answer.strip():
+        clean_answer = raw_text
+    
     final_ai_message = AIMessage(content=clean_answer)
     
-    # Add the cleaned message to the state so that it can be read by the summarizer function.
+    # Masukkan pesan bersih sementara ke state agar bisa dibaca fungsi summarizer
     state["messages"].append(final_ai_message)
     
-    # 2 & 3. Execute the `summarize_and_clean_state` function for .txt archives and reset the message state.
+    # 2 & 3. Jalankan fungsi summarize_and_clean_state
     cleanup_result = summarize_and_clean_state(state)
     
-    # Return a clean message to the state so that the terminal can display the final answer to the user.
+    # Kembalikan pesan bersih ke state
     return {
         "messages": cleanup_result["messages"] + [final_ai_message]
     }
-
 # --- 6. BUILDING A GRAPH (LANGGRAPH) ---
 
 workflow = StateGraph(AgentState)
