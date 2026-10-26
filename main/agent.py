@@ -140,24 +140,21 @@ def validate_code_safety(code_str: str) -> tuple[bool, str]:
                 return False, f"Calling functions is prohibited: {node.func.id}()"
     return True, "Safe"
 
-def refresh_available_tools() -> list:
+def refresh_available_tools():
     """
-    Automatically scan the tools.py file to retrieve
-    all functions that are designated as tools.
+    Secara otomatis memindai semua fungsi yang didefinisikan di dalam file tools.py
+    dan mengembalikannya dalam bentuk list agar bisa di-bind ke LLM.
     """
-    # 1. Reload the module to load the latest code from the physical file
-    importlib.reload(tools)
+    tool_list = []
     
-    refreshed_tools = []
-    
-    # 2. Import all members (functions/variables) from the tools.py module.
+    # Memeriksa semua atribut/fungsi di dalam modul tools.py
     for name, obj in inspect.getmembers(tools, inspect.isfunction):
-        # Check whether the object is a LangChain tool
-        # (it typically has a 'tool_call' attribute or is an instance of BaseTool)
-        if hasattr(obj, "name") and hasattr(obj, "invoke"):
-            refreshed_tools.append(obj)
+        # Opsional: abaikan fungsi internal yang diawali dengan garis bawah (_)
+        if not name.startswith("_"):
+            tool_list.append(obj)
             
-    return refreshed_tools
+    print(f"--- [System] Berhasil memuat {len(tool_list)} tools dari tools.py ---")
+    return tool_list
 
 # --- 5. NODE TOOL MAKER WITH PERMANENT STORAGE ---
 def persistent_tool_maker_node(state: AgentState):
