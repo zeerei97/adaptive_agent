@@ -21,6 +21,8 @@ from tools import add_numbers
 # Masukkan ke dalam list tools secara eksplisit
 tools = [add_numbers]
 
+# **status: TERMINATED**
+
 # Bind ke LLM
 llm_with_tools = llm.bind_tools(tools)
 print("Tools berhasil dimuat:", [t.name for t in tools])
