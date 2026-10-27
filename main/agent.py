@@ -1,398 +1,253 @@
-import operator
-import inspect
 import os
-import importlib
-import tools
-import ast
+import sys
+import importlib.util
+from typing import Annotated, List, Dict, Any, Optional
+from typing_extensions import TypedDict
 from dotenv import load_dotenv
-from typing import Annotated, TypedDict, Union, List, Callable, Any
-
-# if you wanna use open ai
-# from langchain_openai import ChatOpenAI
-# from langchain_core.utils.function_calling import convert_to_openai_tool
 
 from langchain_google_genai import ChatGoogleGenerativeAI
-# from langchain_google_genai._function_utils import convert_to_genai_function_declarations
-
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage, BaseMessage, RemoveMessage
-from langchain_core.tools import tool, BaseTool
-from langgraph.graph import StateGraph, END
+from langchain_core.messages import HumanMessage, AIMessage, ToolMessage, SystemMessage
+from langgraph.graph import StateGraph, START, END
+from langgraph.graph.message import add_messages
+from langgraph.types import interrupt
+from langgraph.prebuilt import ToolNode
+from langgraph.checkpoint.memory import MemorySaver
 
 load_dotenv()
+# Konfigurasi API Key Gemini (pastikan GEMINI_API_KEY sudah diset di environment variables)
+# os.environ["GEMINI_API_KEY"] = "your-api-key-here"
 
-# --- 1. LLM SETTING MODEL ---
-# I want to minimalize hallucinations - temperature = 0 makes the model output more deterministic
-llm = ChatGoogleGenerativeAI(model = "gemini-3.1-flash-lite", temperature=0)
+TOOLS_FILE = "dynamic_math_tools.txt"
 
-# --- 2. STATE DEFINITION ---
+# 1. State Definition
 class AgentState(TypedDict):
-    # Savinng All Message
-    messages: Annotated[List[BaseMessage], operator.add]
-    # Saving a dynamic list of equipment
-    available_tools: List[Callable]
+    messages: Annotated[list, add_messages]
+    missing_math_op: str       # Operasi matematika yang belum ada tool-nya
+    generated_tool_code: str   # Kode Python tool yang dibuat LLM
+    tool_approved: bool        # Status persetujuan manusia
+    feedback: str              # Catatan/alasan jika ditolak
 
-def summarize_and_clean_state(state: AgentState):
-    print("--- [Summarizer] Summarizing the completed text and clearing the state... ---")
+# Inisialisasi Gemini LLM
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
+
+# ---------------------------------------------------------
+# Utility: Manajemen File .txt untuk Tool Dinamis
+# ---------------------------------------------------------
+def save_tool_to_file(code: str):
+    """Menyimpan kode tool yang disetujui ke file .txt"""
+    with open(TOOLS_FILE, "a", encoding="utf-8") as f:
+        f.write("\n\n# --- DYNAMIC TOOL ---\n")
+        f.write(code)
+
+def load_dynamic_tools() -> Dict[str, callable]:
+    """Memuat fungsi-fungsi tool dari file .txt saat runtime"""
+    loaded_tools = {}
+    if not os.path.exists(TOOLS_FILE):
+        return loaded_tools
+    
+    spec = importlib.util.spec_from_file_location("dynamic_math_tools", TOOLS_FILE)
+    if spec and spec.loader:
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["dynamic_math_tools"] = module
+        try:
+            spec.loader.exec_module(module)
+            # Ambil semua fungsi yang didefinisikan di module
+            for attr_name in dir(module):
+                attr = getattr(module, attr_name)
+                if callable(attr) and not attr_name.startswith("_"):
+                    loaded_tools[attr_name] = attr
+        except Exception as e:
+            print(f"Error memuat dynamic tools: {e}")
+            
+    return loaded_tools
+
+# ---------------------------------------------------------
+# Node 1: Agent Router & Decision Maker
+# ---------------------------------------------------------
+# 1. Modifikasi Agent Node agar mendeteksi tool yang tersedia dan membind-nya ke LLM
+def math_agent_node(state: AgentState):
+    """Agent utama yang dilengkapi tool dinamis yang sudah disetujui."""
     messages = state["messages"]
     
-    if not messages:
-        return state
-
-    # 1. Ask the LLM to generate a summary of the current task conversation.
-    summary_prompt = [
-        SystemMessage(content="Provide a concise and compact summary of the mathematical conversation/task below, covering the user's question, the tool(s) created or used, and the final result."),
-    ] + messages
+    # Muat tool dinamis dari file .txt
+    dynamic_tools_dict = load_dynamic_tools()
+    tools_list = list(dynamic_tools_dict.values())
     
-    summary_response = llm.invoke(summary_prompt)
-    task_summary = summary_response.content
+    # Bind tool ke Gemini agar LLM bisa melakukan Native Tool Calling
+    bound_llm = llm.bind_tools(tools_list) if tools_list else llm
     
-    # 2. Save the summary permanently to a .txt file
-    with open("task_history.txt", "a", encoding="utf-8") as f:
-        f.write(f"\n--- Task Summary ---\n{task_summary}\n")
-    print("[Summarizer] Summary successfully saved to 'task_history.txt'")
+    system_prompt = SystemMessage(content="""
+Kamu adalah agent matematika khusus. 
+ATURAN KETAT:
+1. Kamu Wajib menggunakan tool yang tersedia untuk menghitung operasi matematika.
+2. Jika tool yang dibutuhkan BELUM ADA di daftar tool yang terikat, jangan dihitung manual. Berikan respons khusus dengan format persis:
+   [MISSING_TOOL: nama_fungsi (deskripsi singkat)]
+   Contoh: [MISSING_TOOL: hitung_faktorial (Menghitung nilai faktorial dari angka n)]
+""")
     
-    # 3. Create a command to delete the entire history of old messages in the LangGraph state
-    # Use RemoveMessage for each existing message ID
-    delete_messages = [RemoveMessage(id=msg.id) for msg in messages if hasattr(msg, "id") and msg.id]
-    
-    # 4. (Optional) Insert the aforementioned summary as a new SystemMessage so that the agent retains global context.
-    summary_memory_message = SystemMessage(content=f"Previous task history: {task_summary}")
-    
-    return {
-        "messages": delete_messages + [summary_memory_message]
-    }
-
-# --- 3. DEFINITION OF ALL NODE AGENTS ---
-
-def input_filter_node(state: AgentState):
-    print("--- [Input Filter] Checking the relevance of user input... ---")
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    # Specialized prompt for rapid classification
-    filter_prompt = SystemMessage(content=(
-        "You are a strict security and domain filter for a specialized Mathematics Agent. "
-        "Analyze the user's input. Is it related to mathematics, numbers, calculations, arithmetic, algebra, geometry, or asking for a math tool? "
-        "Answer ONLY with 'YES' if it is math-related, or 'NO' if it is completely unrelated (like general knowledge, coding unrelated to math, creative writing, personal chat, etc.)."
-    ))
-    
-    response = llm.invoke([filter_prompt, last_message])
-    
-    # Ambil content dengan aman (bisa string atau list)
-    content = response.content
-    if isinstance(content, list):
-        # Gabungkan teks jika berupa list blok konten
-        response_str = "".join([item.get("text", "") for item in content if isinstance(item, dict)])
-    else:
-        response_str = str(content)
-        
-    decision = response_str.strip().upper()
-    
-    if "NO" in decision:
-        # If it is not a match, provide a polite response directly within the state.
-        polite_reply = AIMessage(content="Sorry, I am a specialized mathematics agent that can only assist with answering math-related questions or calculations. Please feel free to ask any questions about mathematics!")
-        return {"messages": [polite_reply]}
-    
-    # If YES, allow the user's message to continue being processed by the planner (do not modify the messages)
-    return {}
-
-def planner_node(state: AgentState):
-    """
-    Brain Nodes: Analyze requests, select tools, or decide to create new tools.
-    """
-    print("--- [Planner] Thinking... ---")
-    messages = state["messages"]
-    tools = state["available_tools"]
-    
-    # Bind the currently available tools to the LLM
-    llm_with_tools = llm.bind_tools(tools)
-    system_prompt = SystemMessage(content=(
-    "You are an expert mathematical planning agent. "
-    "Your sole objective is to solve the user's validated math problem efficiently. "
-    "1. Check the available tools first. If a suitable tool exists, call it immediately. "
-    "2. If a required tool does not exist, you MUST explicitly output the phrase 'create a tool' so the system can build it. "
-    "3. Never perform calculations manually if a tool can be utilized or created."
-    ))
-    
-    response = llm_with_tools.invoke([system_prompt] + messages)
+    response = bound_llm.invoke([system_prompt] + messages)
     return {"messages": [response]}
 
-# --- 4. AST GUARDRAIL (SAFETY BARRIER) ---
-FORBIDDEN_MODULES = {"os", "sys", "subprocess", "shutil", "socket", "requests", "urllib", "pathlib"}
-FORBIDDEN_BUILTINS = {"eval", "exec", "open", "__import__", "compile"}
-
-def validate_code_safety(code_str: str) -> tuple[bool, str]:
-    try:
-        tree = ast.parse(code_str)
-    except SyntaxError as e:
-        return False, f"Syntax error: {e}"
-
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name.split('.')[0] in FORBIDDEN_MODULES:
-                    return False, f"import of modules is prohibited: {alias.name}"
-        elif isinstance(node, ast.ImportFrom):
-            if node.module and node.module.split('.')[0] in FORBIDDEN_MODULES:
-                return False, f"Imports prohibited from: {node.module}"
-        elif isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_BUILTINS:
-                return False, f"Calling functions is prohibited: {node.func.id}()"
-    return True, "Safe"
-
-def refresh_available_tools():
-    """
-    Secara otomatis memindai semua fungsi yang didefinisikan di dalam file tools.py
-    dan mengembalikannya dalam bentuk list agar bisa di-bind ke LLM.
-    """
-    tool_list = []
-    
-    # Memeriksa semua atribut/fungsi di dalam modul tools.py
-    for name, obj in inspect.getmembers(tools, inspect.isfunction):
-        # Opsional: abaikan fungsi internal yang diawali dengan garis bawah (_)
-        if not name.startswith("_"):
-            tool_list.append(obj)
-            
-    print(f"--- [System] Berhasil memuat {len(tool_list)} tools dari tools.py ---")
-    return tool_list
-
-# --- 5. NODE TOOL MAKER WITH PERMANENT STORAGE ---
-def persistent_tool_maker_node(state: AgentState):
-    print("--- [Tool Maker] Creating a New Tool and Saving It to a File... ---")
+# ---------------------------------------------------------
+# Node 2: Tool Creator (Membuat tool baru jika belum ada)
+# ---------------------------------------------------------
+def tool_creator_node(state: AgentState):
+    """Agent pembuat tool yang menulis kode Python bersih untuk operasi matematika baru."""
     messages = state["messages"]
-    last_message = messages[-1]
+    last_message = messages[-1].content
+    feedback = state.get("feedback", "")
     
-    # 1. Ask an LLM to generate Python function code that includes the @tool decorator.
-    maker_prompt = SystemMessage(content=(
-        "You are an expert Python developer."
-        "Write a clean Python function using the @tool decorator from langchain_core.tools."
-        "Include clear type hints and docstrings."
-        "ONLY output valid Python code without markdown code blocks."
-    ))
-    
-    response = llm.invoke([maker_prompt, HumanMessage(content=f"Create a tool for: {last_message.content}")])
-    generated_code = response.content.strip()
-    
-    # Clean up any markdown if the LLM inadvertently includes it (e.g., ` ```python ... ``` `)
-    if generated_code.startswith("```"):
-        generated_code = generated_code.split("```")[1]
-        if generated_code.startswith("python"):
-            generated_code = generated_code[6:].strip()
-            
-    # 2. AST Security Filter / Validation
-    is_safe, msg = validate_code_safety(generated_code)
-    if not is_safe:
-        print(f"[SECURITY REJECTED] Code rejected for security reasons: {msg}")
-        return {"messages": [AIMessage(content=f"Tool creation was blocked by the security system: {msg}")]}
-    
-    # 3. Save permanently to the file 'tools.py'
-    try:
-        with open("tools.py", "a", encoding="utf-8") as f:
-            f.write(f"\n\n{generated_code}\n")
-        print("[Tool Maker] Successfully added a new tool to the file 'tools.py'!")
-        
-        # Retrieve all tool functions from the updated tools.py file.
-        updated_tools_list = refresh_available_tools
-        
-        return {"available_tools": updated_tools_list}
-        
-    except Exception as e:
-        print(f"Failed to save to file: {e}")
-        return {"messages": [AIMessage(content=f"Failed to save tool to file: {e}")]}
+    creation_prompt = f"""
+Seorang user meminta perhitungan matematika, namun tool yang dibutuhkan belum tersedia.
+Permintaan/Konteks terakhir: {last_message}
+{f"Feedback dari penolakan sebelumnya: {feedback}" if feedback else ""}
 
-def execution_node(state: AgentState):
-    """
-    Executor Node: Executes the tool calls requested by the Planner.
-    """
-    print("--- [Eksekutor] Running Tool... ---")
-    messages = state["messages"]
-    last_message = messages[-1]
-    tools = state["available_tools"]
+Tuliskan kode fungsi Python (menggunakan decorator `@tool` dari `langchain_core.tools` atau fungsi Python standar dengan type hinting lengkap dan docstring yang jelas) untuk menyelesaikan masalah tersebut.
+Keluarkan HANYA blok kode Python valid tanpa teks penjelasan di luar blok kode.
+"""
+    response = llm.invoke([HumanMessage(content=creation_prompt)])
     
-    tool_call = last_message.tool_calls[0]
-    tool_name = tool_call["name"]
-    tool_args = tool_call["args"]
-    
-    # Find tool function by name
-    chosen_tool = next((t for t in tools if t.name == tool_name), None)
-    
-    if chosen_tool:
-        result = chosen_tool.invoke(tool_args)
-        print(f"[Eksekutor] Result {tool_name}({tool_args}): {result}")
-        # Return as an AIMessage with a tool_call_id
-        return {"messages": [AIMessage(content=str(result), tool_call_id=tool_call["id"], name=tool_name)]}
-    else:
-        return {"messages": [AIMessage(content=f"Error: Tool '{tool_name}' not found.", tool_call_id=tool_call["id"])]}
+    # Ekstraksi kode Python dari respons LLM
+    code_text = response.content
+    if "```python" in code_text:
+        code_text = code_text.split("```python")[1].split("```")[0].strip()
+    elif "```" in code_text:
+        code_text = code_text.split("```")[1].split("```")[0].strip()
+        
+    return {"generated_tool_code": code_text}
 
-# --- 6. DEFINITION OF DIRECTION LOGIC (ROUTER) ---
-
-def filter_router(state: AgentState):
-    # Check the last message. If the message is a rejection from a filter, proceed directly to END.
-    last_message = state["messages"][-1]
+# ---------------------------------------------------------
+# Node 3: Human Review & Approval (Breakpoint / Interrupt)
+# ---------------------------------------------------------
+def human_review_node(state: AgentState):
+    """Menyerahkan tool ke manusia untuk disetujui atau ditolak menggunakan interrupt LangGraph."""
+    code = state["generated_tool_code"]
     
-    # If the last message contains our rejection statement, direct to END.
-    if "Sorry, I am a mathematics agent." in last_message.content:
-        return END
+    # Melakukan interrupt untuk meminta input persetujuan dari manusia
+    human_decision = interrupt({
+        "prompt": "Tool matematika baru telah dibuat oleh agent. Mohon tinjau kode di bawah ini:",
+        "generated_code": code,
+        "instructions": "Ketik 'approve' untuk menyetujui dan menyimpan, atau berikan alasan penolakan untuk merevisi."
+    })
+    
+    # human_decision berisi dictionary atau nilai yang dikirimkan saat meresume graph
+    approved = human_decision.get("approved", False)
+    feedback = human_decision.get("feedback", "")
+    
+    if approved:
+        save_tool_to_file(code)
         
-    return "proceed_to_planner"
-
-def router(state: AgentState):
-    messages = state["messages"]
-    last_message = messages[-1]
-    
-    if last_message.tool_calls:
-        return "call_tool"
-    
-    # Retrieve content securely
-    content = last_message.content
-    if isinstance(content, list):
-        content_str = "".join([item.get("text", "") for item in content if isinstance(item, dict)])
-    else:
-        content_str = str(content)
-        
-    content_lower = content_str.lower()
-    
-    # Expand keywords for tool creation detection
-    keywords = ["new tool", "create a tool", "need a tool", "missing tool", "tool needed"]
-    if any(kw in content_lower for kw in keywords):
-        return "make_tool"
-        
-    return END
-
-def post_processor_node(state: AgentState):
-    print("--- [Post-Processor] Merapikan jawaban akhir & mengamankan memori... ---")
-    messages = state["messages"]
-    
-    # Ambil hasil mentah terakhir dengan aman
-    last_message = messages[-1]
-    raw_content = last_message.content
-    
-    # Ekstrak teks mentah jika berbentuk list
-    if isinstance(raw_content, list):
-        raw_text = "".join([item.get("text", "") for item in raw_content if isinstance(item, dict)])
-    else:
-        raw_text = str(raw_content)
-        
-    # Fallback jika raw_text kosong
-    if not raw_text.strip():
-        raw_text = "Task selesai."
-    
-    # 1. Rapikan jawaban agar bersih
-    formatting_prompt = SystemMessage(content=(
-        "You are a helpful mathematical assistant. "
-        "Take the raw result/answer and format it into a clean, professional, and clear final response for the user. "
-        "Keep it concise and direct."
-    ))
-    
-    format_response = llm.invoke([formatting_prompt, AIMessage(content=raw_text)])
-    
-    # Ekstrak hasil format dengan aman
-    clean_content = format_response.content
-    if isinstance(clean_content, list):
-        clean_answer = "".join([item.get("text", "") for item in clean_content if isinstance(item, dict)])
-    else:
-        clean_answer = str(clean_content)
-        
-    # Jika hasil format dari LLM kosong, gunakan raw_text sebagai cadangan
-    if not clean_answer.strip():
-        clean_answer = raw_text
-    
-    final_ai_message = AIMessage(content=clean_answer)
-    
-    # Masukkan pesan bersih sementara ke state agar bisa dibaca fungsi summarizer
-    state["messages"].append(final_ai_message)
-    
-    # 2 & 3. Jalankan fungsi summarize_and_clean_state
-    cleanup_result = summarize_and_clean_state(state)
-    
-    # Kembalikan pesan bersih ke state
     return {
-        "messages": cleanup_result["messages"] + [final_ai_message]
+        "tool_approved": approved,
+        "feedback": feedback
     }
-# --- 6. BUILDING A GRAPH (LANGGRAPH) ---
 
+# ---------------------------------------------------------
+# Node 4: Tool Execution
+# ---------------------------------------------------------
+# 3. Tool Executor Node yang benar-benar mengeksekusi fungsi Python secara programmatik
+def tool_executor_node(state: AgentState):
+    """Mengeksekusi fungsi Python dari file .txt berdasarkan tool_calls dari Gemini."""
+    dynamic_tools_dict = load_dynamic_tools()
+    
+    # Menggunakan ToolNode bawaan LangGraph untuk mengeksekusi tool yang di-bind
+    from langgraph.prebuilt import ToolNode
+    tool_node = ToolNode(list(dynamic_tools_dict.values()))
+    
+    return tool_node.invoke(state)
+
+# ---------------------------------------------------------
+# Routing Logic
+# ---------------------------------------------------------
+# 2. Modifikasi Routing untuk mendeteksi apakah agent ingin memanggil tool atau butuh tool baru
+def router_after_agent(state: AgentState):
+    last_msg = state["messages"][-1]
+    
+    # Jika LLM menghasilkan tool_calls, arahkan ke executor tool
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "execute_tool"
+        
+    # Jika LLM mengeluarkan teks [MISSING_TOOL:...], buat tool baru
+    if isinstance(last_msg.content, str) and "[MISSING_TOOL:" in last_msg.content:
+        return "create_tool"
+        
+    return "end"
+
+def router_after_review(state: AgentState):
+    if state.get("tool_approved", False):
+        return "execute_tool"
+    else:
+        return "create_tool" # Rekomendasi ulang jika ditolak
+
+# ---------------------------------------------------------
+# Membangun LangGraph Workflow
+# ---------------------------------------------------------
 workflow = StateGraph(AgentState)
 
-# add nodes
-workflow.add_node("input_filter", input_filter_node)
-workflow.add_node("planner", planner_node)
-workflow.add_node("tool_maker", persistent_tool_maker_node)
-workflow.add_node("executor", execution_node)
-workflow.add_node("post_processor", post_processor_node)
+workflow.add_node("agent", math_agent_node)
+workflow.add_node("tool_creator", tool_creator_node)
+workflow.add_node("human_review", human_review_node)
+workflow.add_node("tool_executor", tool_executor_node) # Menggunakan eksekusi programmatik
 
-# Hubungkan entry point ke input_filter
-workflow.set_entry_point("input_filter")
+workflow.add_edge(START, "agent")
 
-# Tambahkan conditional edge dari input_filter
-workflow.add_conditional_edges(
-    "input_filter",
-    filter_router,
-    {
-        "proceed_to_planner": "planner",
-        END: END
-    }
-)
+# Routing setelah agent
+workflow.add_conditional_edges("agent", router_after_agent, {
+    "execute_tool": "tool_executor",
+    "create_tool": "tool_creator",
+    "end": END
+})
 
-workflow.add_conditional_edges(
-    "planner",
-    router,
-    {
-        "call_tool": "executor",
-        "make_tool": "tool_maker",
-        END: END
-    }
-)
+workflow.add_edge("tool_creator", "human_review")
+workflow.add_conditional_edges("human_review", router_after_review, {
+    "create_tool": "tool_creator",
+    "execute_tool": "tool_executor"
+})
+workflow.add_edge("tool_executor", "agent") # Kembalikan ke agent agar LLM bisa membacakan hasil tool ke user
 
-# After creating the tool, return to Planner to re-evaluate
-workflow.add_edge("tool_maker", "planner")
-# After running the tool, return to Planner to summarize the answers
-workflow.add_edge("executor", "post_processor")
-workflow.add_edge("post_processor", END)
+# Compile graph dengan memory checkpointer (diperlukan untuk fitur interrupt)
 
-# Compile Graph
-app = workflow.compile()
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory)
 
-# --- 7. STARTING THE AGENT ---
+# Konfigurasi thread untuk interaksi human-in-the-loop
+config = {"configurable": {"thread_id": "math_session_1"}}
 
-if __name__ == "__main__":
-    print("\n=== GETTING STARTED WITH AN ADAPTIVE AND INTERACTIVE MATHEMATICS AGENT ===\n")
-    print("Type a math question (example: 'What is 10 plus 5' or '15 minus 7').")
-    print("Type 'exit' or 'done' to stop.\n")
+# 1. User memberikan perintah operasi matematika yang tool-nya belum ada
+query = HumanMessage(content="Tolong hitung faktorial dari angka 6 menggunakan tool.")
+print(f"User: {query.content}\n" + "-"*40)
+
+# Jalankan agent hingga mencapai titik interrupt (human_review)
+for event in app.stream({"messages": [query]}, config, stream_mode="values"):
+    if "messages" in event:
+        latest = event["messages"][-1]
+        if isinstance(latest, AIMessage) and latest.content:
+            print(f"Agent: {latest.content}")
+
+# Cek apakah graph berhenti di interrupt
+state = app.get_state(config)
+if state.next:
+    print("\n[Graph Berhenti: Menunggu Persetujuan Manusia]")
+    current_node = state.next[0]
+    print(f"Berhenti di node: {current_node}")
     
-    # 1. Initialize the initial state by loading all tools from the tools.py file automatically
-    current_state = {
-        "messages": [],
-        "available_tools": refresh_available_tools()
-    }
-    
-    # 2. Interactive loop to accept user input
-    while True:
-        try:
-            user_input = input("\nUser: ").strip()
-            
-            if user_input.lower() in ["exit", "done"]:
-                print("Exit the program. See you!")
-                break
-                
-            if not user_input:
-                continue
-                
-            # Add new messages from users to the messages history in the state
-            current_state["messages"].append(HumanMessage(content=user_input))
-            
-            # Run the graph in its entirety. 
-            print("\n--- [Sistem] The Agent is processing... ---")
-            current_state = app.invoke(current_state)
-            
-            # Take the final answer from the agent safely
-            final_response = current_state["messages"][-1].content
-            print(f"\nAI Agent: {final_response}")
-            
-            # Update tool list in state (jika ada tool baru yang dibuat oleh tool_maker)
-            current_state["available_tools"] = refresh_available_tools()
-            
-        except KeyboardInterrupt:
-            print("\nThe program was terminated by the user.")
-            break
-        except Exception as e:
-            print(f"\nAn error occurred: {e}")
+    if current_node == "human_review":
+        # Ambil task interrupt untuk melihat kode yang digenerate agent
+        task_interrupt = state.tasks[0].interrupts[0].value
+        print("\n--- KODE TOOL YANG DIBUAT AGENT ---")
+        print(task_interrupt["generated_code"])
+        print("-" * 40)
+        
+        # 2. Simulasi Keputusan Manusia (Contoh: Menyetujui tool)
+        # Jika ingin menolak, ubah approved=False dan berikan feedback.
+        human_response = {"approved": True, "feedback": "Kode sudah bagus dan aman."}
+        
+        print("\nManusia menyetujui tool. Melanjutkan eksekusi...")
+        
+        # Lanjutkan graph dengan mengirim hasil keputusan manusia menggunakan Command/resume
+        from langgraph.types import Command
+        for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
+            if "messages" in event:
+                latest = event["messages"][-1]
+                if isinstance(latest, AIMessage) and latest.content:
+                    print(f"Agent Final: {latest.content}")
