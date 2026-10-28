@@ -12,7 +12,6 @@ from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 
 from RestrictedPython import compile_restricted, safe_globals
-from RestrictedPython import compile_restricted, safe_globals
 from RestrictedPython.Guards import safer_getattr
 
 # Konfigurasi API Key Gemini (pastikan GEMINI_API_KEY sudah diset)
@@ -48,12 +47,9 @@ def extract_text(content: Any) -> str:
 
 def run_with_restricted_python(code_text: str) -> str:
     """
-    Sandbox menggunakan RestrictedPython versi terbaru:
-    - Menangkap SyntaxError langsung saat kompilasi.
-    - Menyediakan _getattr_ dan _print yang aman sesuai standar RestrictedPython.
+    Sandbox menggunakan RestrictedPython yang mendukung seluruh variasi print helper.
     """
     try:
-        # compile_restricted mengembalikan objek code secara langsung
         byte_code = compile_restricted(code_text, '<string>', 'exec')
     except SyntaxError as e:
         return f"Ditolak karena SyntaxError: {e}"
@@ -65,26 +61,23 @@ def run_with_restricted_python(code_text: str) -> str:
     my_globals['math'] = math
     my_globals['_getattr_'] = safer_getattr
 
-    # Penampung hasil cetak (print collector) yang kompatibel dengan RestrictedPython
+    # Penampung hasil cetak (print collector)
     printed_values = []
-    def _print(*args, **kwargs):
+    def safe_print(*args, **kwargs):
         output = " ".join(map(str, args))
         printed_values.append(output)
 
-    my_globals['_print'] = _print
-    
-    # Variabel 'printed' dibutuhkan oleh beberapa mekanisme internal RestrictedPython
+    # Daftarkan ke semua variasi nama print helper untuk mencegah NameError
+    my_globals['_print'] = safe_print
+    my_globals['_print_'] = safe_print
     my_globals['printed'] = printed_values
 
     my_locals = {}
 
     try:
-        # Eksekusi bytecode yang sudah dikompilasi
         exec(byte_code, my_globals, my_locals)
-        
-        # Ambil hasil dari printed_values atau printed
-        output_result = "\n".join(printed_values)
-        return output_result if output_result else "Eksekusi berhasil (tanpa output print)."
+        result = "\n".join(printed_values)
+        return result if result else "Eksekusi berhasil (tanpa output print)."
     except Exception as e:
         return f"Error saat eksekusi runtime: {e}"
 # ---------------------------------------------------------
