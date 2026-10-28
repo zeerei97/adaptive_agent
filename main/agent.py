@@ -2,6 +2,7 @@ import os
 import math
 from typing import Annotated, Dict, Any
 from typing_extensions import TypedDict
+from dotenv import load_dotenv
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage, SystemMessage
