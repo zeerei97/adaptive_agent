@@ -25,3 +25,17 @@ Manusia menyetujui kode. Menjalankan di RestrictedPython...
 
 Hasil Eksekusi RestrictedPython:
 Error saat eksekusi runtime: name '_print_' is not defined
+
+revisi 2
+hasil = faktorial_10 - akar_10000
+
+# Mencetak hasil
+print(hasil)
+--------------------------------------------------
+
+Manusia menyetujui kode. Menjalankan di RestrictedPython...
+/workspaces/adaptive_agent/.venv/lib/python3.11/site-packages/RestrictedPython/compile.py:249: SyntaxWarning: Line None: Prints, but never reads 'printed' variable.
+  warnings.warn(
+
+Hasil Eksekusi RestrictedPython:
+Error saat eksekusi runtime: __import__ not found
