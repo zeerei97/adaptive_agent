@@ -1,6 +1,4 @@
 import os
-import sys
-import io
 import math
 from typing import Annotated, Dict, Any
 from typing_extensions import TypedDict
@@ -12,12 +10,10 @@ from langgraph.graph.message import add_messages
 from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 
-from dotenv import load_dotenv
-load_dotenv()
+from RestrictedPython import compile_restricted, safe_globals
 
-# Konfigurasi API Key Gemini (pastikan GEMINI_API_KEY sudah diset di environment variables)
+# Konfigurasi API Key Gemini (pastikan GEMINI_API_KEY sudah diset)
 # os.environ["GEMINI_API_KEY"] = "your-api-key-here"
-llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
 
 # 1. Definisi State Graph
 class AgentState(TypedDict):
@@ -25,9 +21,13 @@ class AgentState(TypedDict):
     generated_code: str
     tool_approved: bool
     feedback: str
+load_dotenv()
+
+# Inisialisasi LLM Gemini
+llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0)
 
 # ---------------------------------------------------------
-# Utility Helpers
+# Utility Helpers & RestrictedPython Sandbox
 # ---------------------------------------------------------
 def extract_text(content: Any) -> str:
     """Mengekstrak string murni dari berbagai format respons Gemini"""
@@ -43,40 +43,41 @@ def extract_text(content: Any) -> str:
         return "".join(text_parts)
     return str(content)
 
-def safe_execute_code(code_text: str) -> str:
+def run_with_restricted_python(code_text: str) -> str:
     """
-    Sandbox exec() yang aman dan terisolasi:
-    - Membatasi built-in functions yang berbahaya (tidak ada open, exec, import bebas).
-    - Hanya menyediakan fungsi dasar yang aman dan modul `math`.
-    - Menangkap hasil print() untuk dikembalikan sebagai string.
+    Sandbox menggunakan RestrictedPython:
+    - Mengompilasi kode dan memblokir akses berbahaya (akses file, import bebas, atribut privat).
+    - Menyediakan lingkungan globals yang bersih (safe_globals) + modul math.
+    - Menangkap fungsi print() secara aman tanpa mencetak langsung ke sistem utama.
     """
-    safe_builtins = {
-        "abs": abs, "max": max, "min": min, "pow": pow, "round": round,
-        "sum": sum, "range": range, "int": int, "float": float,
-        "str": str, "list": list, "dict": dict, "len": len, "print": print
-    }
-
-    restricted_globals = {
-        "__builtins__": safe_builtins,
-        "math": math
-    }
-
-    local_namespace = {}
+    # 1. Kompilasi kode dengan pembatasan keamanan
+    byte_code = compile_restricted(code_text, '<string>', 'exec')
     
-    # Redirect stdout untuk menangkap hasil print()
-    old_stdout = sys.stdout
-    new_stdout = io.StringIO()
-    sys.stdout = new_stdout
+    if byte_code.errors:
+        return f"Ditolak oleh kebijakan keamanan RestrictedPython: {byte_code.errors}"
+
+    # 2. Siapkan lingkungan aman
+    my_globals = safe_globals.copy()
+    my_globals['math'] = math
+
+    # Penampung hasil cetak (print collector) yang aman
+    printed_output = []
+    def safe_print(*args, **kwargs):
+        output = " ".join(map(str, args))
+        printed_output.append(output)
+
+    # RestrictedPython otomatis mengarahkan fungsi print() ke _print
+    my_globals['_print'] = safe_print
+    
+    my_locals = {}
 
     try:
-        exec(code_text, restricted_globals, local_namespace)
-        output_result = new_stdout.getvalue()
+        # 3. Eksekusi bytecode yang sudah dibersihkan
+        exec(byte_code.code, my_globals, my_locals)
+        result = "\n".join(printed_output)
+        return result if result else "Eksekusi berhasil (tanpa output print)."
     except Exception as e:
-        output_result = f"Error saat eksekusi kode: {e}"
-    finally:
-        sys.stdout = old_stdout
-
-    return output_result.strip()
+        return f"Error saat eksekusi runtime: {e}"
 
 # ---------------------------------------------------------
 # Node 1: Code Writer (Agen Pembuat Kode)
@@ -94,14 +95,13 @@ Permintaan pengguna: "{last_message}"
 
 Tuliskan kode Python lengkap yang menyelesaikan perhitungan matematika di atas.
 Ketentuan:
-1. Gunakan modul `math` jika diperlukan.
+1. Gunakan modul `math` jika diperlukan (misal: math.factorial, math.sqrt, dll).
 2. Cetak hasil akhir perhitungan menggunakan fungsi `print(...)`.
-3. Keluarkan HANYA blok kode Python valid di dalam markdown ```python ... ``` tanpa teks penjelasan lain di luar blok kode.
+3. Keluarkan HANYA blok kode Python valid di dalam markdown ```python ... ``` tanpa teks penjelasan lain.
 """
     response = llm.invoke([HumanMessage(content=prompt)])
     code_text = extract_text(response.content)
     
-    # Ekstraksi blok kode dari markdown
     if "```python" in code_text:
         code_text = code_text.split("```python")[1].split("```")[0].strip()
     elif "```" in code_text:
@@ -116,7 +116,6 @@ def human_review_node(state: AgentState):
     """Menjeda eksekusi graph untuk meminta persetujuan manusia."""
     code = state["generated_code"]
     
-    # LangGraph interrupt untuk human-in-the-loop
     human_decision = interrupt({
         "prompt": "Agen telah menulis kode Python baru. Mohon tinjau kodenya:",
         "generated_code": code,
@@ -132,14 +131,14 @@ def human_review_node(state: AgentState):
     }
 
 # ---------------------------------------------------------
-# Node 3: Code Executor (Sandbox Execution)
+# Node 3: Code Executor (RestrictedPython Sandbox)
 # ---------------------------------------------------------
 def code_executor_node(state: AgentState):
-    """Mengeksekusi kode yang sudah disetujui di dalam sandbox yang aman."""
+    """Mengeksekusi kode di dalam sandbox RestrictedPython yang aman."""
     code = state["generated_code"]
-    result = safe_execute_code(code)
+    result = run_with_restricted_python(code)
     
-    return {"messages": [AIMessage(content=f"Hasil Eksekusi Program:\n{result}")]}
+    return {"messages": [AIMessage(content=f"Hasil Eksekusi RestrictedPython:\n{result}")]}
 
 # ---------------------------------------------------------
 # Routing Logic
@@ -148,7 +147,7 @@ def router_after_review(state: AgentState):
     if state.get("tool_approved", False):
         return "execute"
     else:
-        return "rewrite" # Kembali ke writer jika ditolak untuk diperbaiki berdasarkan feedback
+        return "rewrite"
 
 # ---------------------------------------------------------
 # Menyusun Workflow LangGraph
@@ -167,46 +166,39 @@ workflow.add_conditional_edges("review", router_after_review, {
 })
 workflow.add_edge("executor", END)
 
-# Wajib menggunakan MemorySaver untuk mendukung fitur interrupt
 memory = MemorySaver()
 app = workflow.compile(checkpointer=memory)
 
-# Konfigurasi thread untuk sesi interaksi
-config = {"configurable": {"thread_id": "sandbox_session_1"}}
+config = {"configurable": {"thread_id": "restricted_session_1"}}
 
-# 1. Kirim prompt awal ke agent
-query = HumanMessage(content="Tolong hitung nilai dari 8 faktorial ditambah akar kuadrat dari 144.")
+# 1. Kirim prompt awal
+query = HumanMessage(content="Tolong hitung nilai dari 10 faktorial dikurangi akar kuadrat dari 10000.")
 print(f"User: {query.content}\n" + "-"*50)
 
-# Jalankan graph sampai mencapai titik interrupt (human_review)
 for event in app.stream({"messages": [query]}, config, stream_mode="values"):
     if "messages" in event:
         latest = event["messages"][-1]
         if isinstance(latest, AIMessage) and latest.content:
             print(f"Agent: {latest.content}")
 
-# 2. Cek status graph apakah sedang berhenti di interrupt
+# 2. Periksa status interrupt
 state = app.get_state(config)
 if state.next:
-    print("\n[Graph Berhenti: Menunggu Peninjauan & Persetujuan Manusia]")
-    
-    # Ambil data kode yang di-generate agent dari payload interrupt
+    print("\n[Graph Berhenti: Menunggu Peninjauan Manusia]")
     if state.tasks and state.tasks[0].interrupts:
         interrupt_value = state.tasks[0].interrupts[0].value
         print("\n--- KODE PYTHON YANG DIBUAT AGEN ---")
         print(interrupt_value["generated_code"])
         print("-" * 50)
         
-        # 3. Simulasi Keputusan Manusia (Contoh: Menyetujui kode)
-        # Jika ingin menolak, ganti 'approved': False dan berikan 'feedback'
+        # 3. Simulasi Manusia Menyetujui Kode
         human_response = {
             "approved": True, 
-            "feedback": "Kode sudah benar dan aman."
+            "feedback": "Kode aman."
         }
         
-        print("\nManusia menyetujui kode. Melanjutkan eksekusi di sandbox...")
+        print("\nManusia menyetujui kode. Menjalankan di RestrictedPython...")
         
-        # Lanjutkan graph menggunakan Command(resume=...)
         for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
             if "messages" in event:
                 latest = event["messages"][-1]
