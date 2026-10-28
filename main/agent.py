@@ -12,6 +12,8 @@ from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 
 from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython import compile_restricted, safe_globals
+from RestrictedPython.Guards import safer_getattr
 
 # Konfigurasi API Key Gemini (pastikan GEMINI_API_KEY sudah diset)
 # os.environ["GEMINI_API_KEY"] = "your-api-key-here"
@@ -46,40 +48,45 @@ def extract_text(content: Any) -> str:
 
 def run_with_restricted_python(code_text: str) -> str:
     """
-    Sandbox menggunakan RestrictedPython:
-    - Mengompilasi kode dan memblokir akses berbahaya (akses file, import bebas, atribut privat).
-    - Menyediakan lingkungan globals yang bersih (safe_globals) + modul math.
-    - Menangkap fungsi print() secara aman tanpa mencetak langsung ke sistem utama.
+    Sandbox menggunakan RestrictedPython versi terbaru:
+    - Menangkap SyntaxError langsung saat kompilasi.
+    - Menyediakan _getattr_ dan _print yang aman sesuai standar RestrictedPython.
     """
-    # 1. Kompilasi kode dengan pembatasan keamanan
-    byte_code = compile_restricted(code_text, '<string>', 'exec')
-    
-    if byte_code.errors:
-        return f"Ditolak oleh kebijakan keamanan RestrictedPython: {byte_code.errors}"
+    try:
+        # compile_restricted mengembalikan objek code secara langsung
+        byte_code = compile_restricted(code_text, '<string>', 'exec')
+    except SyntaxError as e:
+        return f"Ditolak karena SyntaxError: {e}"
+    except Exception as e:
+        return f"Error kompilasi RestrictedPython: {e}"
 
-    # 2. Siapkan lingkungan aman
+    # Siapkan lingkungan aman
     my_globals = safe_globals.copy()
     my_globals['math'] = math
+    my_globals['_getattr_'] = safer_getattr
 
-    # Penampung hasil cetak (print collector) yang aman
-    printed_output = []
-    def safe_print(*args, **kwargs):
+    # Penampung hasil cetak (print collector) yang kompatibel dengan RestrictedPython
+    printed_values = []
+    def _print(*args, **kwargs):
         output = " ".join(map(str, args))
-        printed_output.append(output)
+        printed_values.append(output)
 
-    # RestrictedPython otomatis mengarahkan fungsi print() ke _print
-    my_globals['_print'] = safe_print
+    my_globals['_print'] = _print
     
+    # Variabel 'printed' dibutuhkan oleh beberapa mekanisme internal RestrictedPython
+    my_globals['printed'] = printed_values
+
     my_locals = {}
 
     try:
-        # 3. Eksekusi bytecode yang sudah dibersihkan
-        exec(byte_code.code, my_globals, my_locals)
-        result = "\n".join(printed_output)
-        return result if result else "Eksekusi berhasil (tanpa output print)."
+        # Eksekusi bytecode yang sudah dikompilasi
+        exec(byte_code, my_globals, my_locals)
+        
+        # Ambil hasil dari printed_values atau printed
+        output_result = "\n".join(printed_values)
+        return output_result if output_result else "Eksekusi berhasil (tanpa output print)."
     except Exception as e:
         return f"Error saat eksekusi runtime: {e}"
-
 # ---------------------------------------------------------
 # Node 1: Code Writer (Agen Pembuat Kode)
 # ---------------------------------------------------------

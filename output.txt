@@ -1,0 +1,27 @@
+User: Tolong hitung nilai dari 10 faktorial dikurangi akar kuadrat dari 10000.
+--------------------------------------------------
+
+[Graph Berhenti: Menunggu Peninjauan Manusia]
+
+--- KODE PYTHON YANG DIBUAT AGEN ---
+import math
+
+# Menghitung 10 faktorial
+faktorial_10 = math.factorial(10)
+
+# Menghitung akar kuadrat dari 10000
+akar_10000 = math.sqrt(10000)
+
+# Menghitung hasil akhir
+hasil = faktorial_10 - akar_10000
+
+# Mencetak hasil
+print(hasil)
+--------------------------------------------------
+
+Manusia menyetujui kode. Menjalankan di RestrictedPython...
+/workspaces/adaptive_agent/.venv/lib/python3.11/site-packages/RestrictedPython/compile.py:249: SyntaxWarning: Line None: Prints, but never reads 'printed' variable.
+  warnings.warn(
+
+Hasil Eksekusi RestrictedPython:
+Error saat eksekusi runtime: name '_print_' is not defined

@@ -8,3 +8,4 @@ langchain-community
 langchain-chroma
 pypdf
 langchain-text-splitters
+RestrictedPython
