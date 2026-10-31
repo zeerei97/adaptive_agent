@@ -47,7 +47,7 @@ def extract_text(content: Any) -> str:
 
 def run_with_restricted_python(code_text: str) -> str:
     """
-    Sandbox menggunakan RestrictedPython yang mendukung seluruh variasi print helper.
+    Sandbox RestrictedPython dengan dukungan Safe Import untuk modul yang diizinkan.
     """
     try:
         byte_code = compile_restricted(code_text, '<string>', 'exec')
@@ -61,13 +61,23 @@ def run_with_restricted_python(code_text: str) -> str:
     my_globals['math'] = math
     my_globals['_getattr_'] = safer_getattr
 
-    # Penampung hasil cetak (print collector)
+    # Buat fungsi custom safe_import untuk membatasi modul apa saja yang boleh di-import
+    def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
+        allowed_modules = {"math"}
+        if name in allowed_modules:
+            return __import__(name, globals, locals, fromlist, level)
+        raise ImportError(f"Modul '{name}' dilarang oleh kebijakan keamanan sandbox.")
+
+    # Daftarkan fungsi safe_import ke berbagai variasi nama import helper
+    my_globals['__import__'] = safe_import
+    my_globals['_import_'] = safe_import
+
+    # Penampung hasil print()
     printed_values = []
     def safe_print(*args, **kwargs):
         output = " ".join(map(str, args))
         printed_values.append(output)
 
-    # Daftarkan ke semua variasi nama print helper untuk mencegah NameError
     my_globals['_print'] = safe_print
     my_globals['_print_'] = safe_print
     my_globals['printed'] = printed_values
