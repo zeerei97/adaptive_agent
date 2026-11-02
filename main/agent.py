@@ -16,7 +16,7 @@ from RestrictedPython.Guards import safer_getattr
 from RestrictedPython.PrintCollector import PrintCollector
 load_dotenv()
 
-# 1. Definisi State Graph
+# 1. Definition of State Graph
 class AgentState(TypedDict):
     messages: Annotated[list, add_messages]
     generated_code: str
@@ -41,32 +41,32 @@ def extract_text(content: Any) -> str:
         return "".join(text_parts)
     return str(content)
 
-# 2. Sandbox RestrictedPython (Modul math di-preload secara global)
+# 2. Sandbox RestrictedPython (Math module preloaded globally)
 def run_with_restricted_python(code_text: str) -> str:
     try:
-        # Kompilasi kode
+        # Compile code
         byte_code = compile_restricted(code_text, '<string>', 'exec')
     except SyntaxError as e:
         return f"Error SyntaxError: {e}"
     except Exception as e:
         return f"Error kompilasi RestrictedPython: {e}"
 
-    # Siapkan lingkungan aman
+    # Prepare a safe environment
     my_globals = safe_globals.copy()
-    my_globals['math'] = math  # Preload modul math langsung ke global sandbox
+    my_globals['math'] = math  # Preload math modules directly into the global sandbox
     my_globals['_getattr_'] = safer_getattr
 
     def safe_import(name, globals=None, locals=None, fromlist=(), level=0):
         if name == "math":
             return math
-        raise ImportError(f"Modul '{name}' dilarang oleh kebijakan keamanan sandbox.")
+        raise ImportError(f"Module '{name}' prohibited by the sandbox security policy.")
 
     my_globals['_import_'] = safe_import
     restricted_builtins = my_globals['__builtins__'].copy()
     restricted_builtins['__import__'] = safe_import
     my_globals['__builtins__'] = restricted_builtins
 
-    # Penampung hasil print()
+    # Container for print() results
     my_globals['_print_'] = PrintCollector
 
     my_locals = {}
@@ -75,39 +75,39 @@ def run_with_restricted_python(code_text: str) -> str:
         exec(byte_code, my_globals, my_locals)
         print_collector = my_locals.get('_print')
         result = print_collector() if print_collector else ""
-        return result if result else "Eksekusi berhasil (tanpa output print)."
+        return result if result else "Execution successful (no print output)."
     except Exception as e:
-        return f"Error saat eksekusi runtime: {e}"
+        return f"Error during runtime execution: {e}"
 
-# 3. Nodes dengan Instruksi Anti-Import
+# 3. Nodes with Anti-Import Instructions
 def code_writer_node(state: AgentState):
     messages = state["messages"]
     feedback = state.get("feedback", "")
     execution_error = state.get("execution_error", "")
     last_message = extract_text(messages[-1].content)
     
-    # Siapkan catatan perbaikan di luar f-string utama untuk menghindari SyntaxError backslash di Python 3.11
+    # Set up a fix note outside the main f-string to avoid backslash SyntaxError in Python 3.11
     error_section = ""
     if feedback or execution_error:
         notes = []
         if feedback:
-            notes.append(f"- Feedback dari manusia: {feedback}")
+            notes.append(f"- Feedback from humans: {feedback}")
         if execution_error:
-            notes.append(f"- Error eksekusi sebelumnya di sandbox: {execution_error}\n  (Perbaiki kodenya agar error ini tidak terjadi lagi!)")
+            notes.append(f"- Previous execution error in sandbox: {execution_error}\n  (Fix the code so this error doesn't happen again!)")
         
         combined_notes = "\n".join(notes)
-        error_section = f"Catatan Perbaikan / Error:\n{combined_notes}"
+        error_section = f"Repair Notes / Error:\n{combined_notes}"
 
     prompt = f"""
-Kamu adalah seorang Python Code Interpreter profesional.
-Permintaan pengguna: "{last_message}"
+You are a professional Python Code Interpreter.
+User request: "{last_message}"
 {error_section}
 
-Tuliskan kode Python lengkap yang menyelesaikan perhitungan matematika di atas.
-Ketentuan MUTLAK:
-1. Modul `math` sudah tersedia secara otomatis di lingkungan. **JANGAN menulis `import math`**. Langsung gunakan fungsi `math.factorial(...)`, `math.sqrt(...)`, dll.
-2. Cetak hasil akhir perhitungan menggunakan fungsi `print(...)`.
-3. Keluarkan HANYA blok kode Python valid di dalam markdown ```python ... ``` tanpa teks penjelasan lain.
+Write complete Python code that solves the above math calculations.
+ABSOLUTE Conditions:
+1. The `math` module is automatically available in the environment. **DO NOT write `import math`**. Directly use the `math.factorial(...)`, `math.sqrt(...)`, etc. functions.
+2. Print the final result of the calculation using the `print(...)` function.
+3. Output ONLY valid Python code blocks within the ```python ... ``` markdown without any other explanatory text.
 """
     response = llm.invoke([HumanMessage(content=prompt)])
     code_text = extract_text(response.content)
@@ -125,9 +125,9 @@ Ketentuan MUTLAK:
 def human_review_node(state: AgentState):
     code = state["generated_code"]
     human_decision = interrupt({
-        "prompt": "Agen telah menulis kode Python baru. Mohon tinjau kodenya:",
+        "prompt": "The agent has written new Python code. Please review the code:",
         "generated_code": code,
-        "instructions": "Ketik 'approved': True untuk menyetujui, atau 'approved': False dengan 'feedback' untuk merevisi."
+        "instructions": "Type 'approved': True to approve, or 'approved': False with 'feedback' to revise."
     })
     return {
         "tool_approved": human_decision.get("approved", False),
@@ -142,7 +142,7 @@ def code_executor_node(state: AgentState):
     is_error = result.startswith("Error") or "Ditolak" in result
     
     if is_error:
-        print(f"\n[Sandbox Warning] Terdeteksi Error, memicu Self-Correction (Percobaan ke-{retry_count + 1})...")
+        print(f"\n[Sandbox Warning] Error detected, triggers Self-Correction (Attempt to-{retry_count + 1})...")
         return {
             "execution_success": False,
             "execution_error": result,
@@ -152,7 +152,7 @@ def code_executor_node(state: AgentState):
         return {
             "execution_success": True,
             "execution_error": "",
-            "messages": [AIMessage(content=f"Hasil Eksekusi Berhasil:\n{result}")]
+            "messages": [AIMessage(content=f"Result of Successful Execution:\n{result}")]
         }
 
 # 4. Routing Logic
@@ -189,11 +189,11 @@ memory = MemorySaver()
 app = workflow.compile(checkpointer=memory)
 
 # ==========================================
-# Uji Coba Eksekusi
+# Trial Execution
 # ==========================================
 config = {"configurable": {"thread_id": "restricted_session_preload"}}
 
-query = HumanMessage(content="Tolong hitung nilai dari 10 faktorial dikurangi akar kuadrat dari 10000.")
+query = HumanMessage(content="Please calculate the value of 10 factorial minus the square root of 10000.")
 print(f"User: {query.content}\n" + "-"*50)
 
 for event in app.stream({"messages": [query]}, config, stream_mode="values"):
@@ -204,16 +204,16 @@ for event in app.stream({"messages": [query]}, config, stream_mode="values"):
 
 state = app.get_state(config)
 if state.next:
-    print("\n[Graph Berhenti: Menunggu Peninjauan Manusia]")
+    print("\n[Graph Stopped: Awaiting Human Review]")
     if state.tasks and state.tasks[0].interrupts:
         interrupt_value = state.tasks[0].interrupts[0].value
-        print("\n--- KODE PYTHON YANG DIBUAT AGEN ---")
+        print("\n--- AGENT-GENERATED PYTHON CODE ---")
         print(interrupt_value["generated_code"])
         print("-" * 50)
         
-        # Simulasi Persetujuan Manusia
-        human_response = {"approved": True, "feedback": "Kode aman."}
-        print("\nManusia menyetujui kode. Menjalankan di RestrictedPython...")
+        # Simulation of Human Consent
+        human_response = {"approved": True, "feedback": "Secure code."}
+        print("\nHumans agree on code. Running on RestrictedPython...")
         
         for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
             if "messages" in event:
