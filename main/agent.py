@@ -3,6 +3,7 @@ import math
 from typing import Annotated, Dict, Any
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
+import uuid
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
@@ -191,32 +192,57 @@ app = workflow.compile(checkpointer=memory)
 # ==========================================
 # Trial Execution
 # ==========================================
-config = {"configurable": {"thread_id": "restricted_session_preload"}}
+def running():
+    print("\nHallo, I am math agent to help you")
+    
+    # Buat thread_id unik menggunakan UUID agar sesi bersih dan tidak konflik
+    thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
 
-query = HumanMessage(content="Please calculate the value of 10 factorial minus the square root of 10000.")
-print(f"User: {query.content}\n" + "-"*50)
+    while True:
+        user_input = input("\nwhat is your question: ")
+        if user_input.lower() in ["exit", "quit"]:
+            print("Goodbye!")
+            break
 
-for event in app.stream({"messages": [query]}, config, stream_mode="values"):
-    if "messages" in event:
-        latest = event["messages"][-1]
-        if isinstance(latest, AIMessage) and latest.content:
-            print(f"Agent: {latest.content}")
-
-state = app.get_state(config)
-if state.next:
-    print("\n[Graph Stopped: Awaiting Human Review]")
-    if state.tasks and state.tasks[0].interrupts:
-        interrupt_value = state.tasks[0].interrupts[0].value
-        print("\n--- AGENT-GENERATED PYTHON CODE ---")
-        print(interrupt_value["generated_code"])
-        print("-" * 50)
+        # Gunakan variabel 'messages' yang benar (bukan 'query')
+        messages = [HumanMessage(content=user_input)]
         
-        # Simulation of Human Consent
-        human_response = {"approved": True, "feedback": "Secure code."}
-        print("\nHumans agree on code. Running on RestrictedPython...")
-        
-        for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
+        for event in app.stream({"messages": messages}, config, stream_mode="values"):
             if "messages" in event:
                 latest = event["messages"][-1]
                 if isinstance(latest, AIMessage) and latest.content:
-                    print(f"\n{latest.content}")
+                    print(f"Agent: {latest.content}")
+
+        state = app.get_state(config)
+        if state.next:
+            print("\n[Graph Berhenti: Menunggu Peninjauan Manusia]")
+            if state.tasks and state.tasks[0].interrupts:
+                interrupt_value = state.tasks[0].interrupts[0].value
+                print("\n--- KODE PYTHON YANG DIBUAT AGEN ---")
+                print(interrupt_value["generated_code"])
+                print("-" * 50)
+                
+                # Menerima input nyata dari terminal Anda
+                user_choice = input("Setujui kode ini? (y/n): ").strip().lower()
+                is_approved = user_choice == 'y'
+                feedback_msg = ""
+                
+                if not is_approved:
+                    feedback_msg = input("Masukkan alasan penolakan/feedback untuk agent: ")
+        
+                human_response = {
+                    "approved": is_approved, 
+                    "feedback": feedback_msg
+                }
+                
+                print("\nMelanjutkan eksekusi berdasarkan keputusan Anda...")
+                
+                for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
+                    if "messages" in event:
+                        latest = event["messages"][-1]
+                        if isinstance(latest, AIMessage) and latest.content:
+                            print(f"\n{latest.content}")
+
+# Jalankan program
+running()
