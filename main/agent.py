@@ -215,45 +215,45 @@ def running():
 
         state = app.get_state(config)
         if state.next:
-            print("\n[Graph Berhenti: Menunggu Peninjauan Manusia]")
+            print("\n[Graph Halted: Awaiting Human Review]")
             if state.tasks and state.tasks[0].interrupts:
                 interrupt_value = state.tasks[0].interrupts[0].value
-                print("\n--- KODE PYTHON YANG DIBUAT AGEN ---")
+                print("\n--- AGENT-CREATED PYTHON CODE ---")
                 print(interrupt_value["generated_code"])
                 print("-" * 50)
                 
-                user_choice = input("Setujui kode ini? (y/n): ").strip().lower()
+                user_choice = input("Approve this code? (y/n): ").strip().lower()
                 is_approved = user_choice == 'y'
                 feedback_msg = ""
                 
                 if not is_approved:
-                    feedback_msg = input("Masukkan alasan penolakan/feedback untuk agent: ")
+                    feedback_msg = input("Enter the reason for rejection/feedback for the agent: ")
         
                 human_response = {
                     "approved": is_approved, 
                     "feedback": feedback_msg
                 }
                 
-                print("\nMelanjutkan eksekusi berdasarkan keputusan Anda...")
+                print("\nContinuing execution based on your decision...")
                 
                 # ==========================================
-                # SIMPAN KE 1 FILE TUNGGAL (Append Mode + Timestamp)
+                # SAVE TO A SINGLE FILE (Append Mode + Timestamp)
                 # ==========================================
                 if is_approved:
                     try:
                         timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                         filename = "approved_codes_history.txt"
                         
-                        # Menggunakan mode "a" (append) agar data lama tidak tertimpa
+                        # Use "a" (append) mode so that old data is not overwritten.
                         with open(filename, "a", encoding="utf-8") as f:
                             f.write(f"\n\n{'='*60}\n")
-                            f.write(f"Waktu Disetujui: {timestamp}\n")
+                            f.write(f"Approved Time: {timestamp}\n")
                             f.write(interrupt_value["generated_code"] + "\n")
                             f.write(f"{'='*60}\n")
                             
-                        print(f"📁 Kode berhasil ditambahkan ke riwayat dalam file: {filename}")
+                        print(f"📁 The code has been successfully added to the history within the file: {filename}")
                     except Exception as e:
-                        print(f"❌ Gagal menyimpan kode ke file: {e}")
+                        print(f"❌ Failed to save code to file: {e}")
                 # ==========================================
                 
                 for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
@@ -262,5 +262,5 @@ def running():
                         if isinstance(latest, AIMessage) and latest.content:
                             print(f"\n{latest.content}")
 
-# Jalankan program
+# run the program
 running()
