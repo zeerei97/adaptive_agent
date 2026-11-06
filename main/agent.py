@@ -4,6 +4,7 @@ from typing import Annotated, Dict, Any
 from typing_extensions import TypedDict
 from dotenv import load_dotenv
 import uuid
+import datetime
 
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.messages import HumanMessage, AIMessage
@@ -195,7 +196,6 @@ app = workflow.compile(checkpointer=memory)
 def running():
     print("\nHallo, I am math agent to help you")
     
-    # Buat thread_id unik menggunakan UUID agar sesi bersih dan tidak konflik
     thread_id = str(uuid.uuid4())
     config = {"configurable": {"thread_id": thread_id}}
 
@@ -205,7 +205,6 @@ def running():
             print("Goodbye!")
             break
 
-        # Gunakan variabel 'messages' yang benar (bukan 'query')
         messages = [HumanMessage(content=user_input)]
         
         for event in app.stream({"messages": messages}, config, stream_mode="values"):
@@ -223,7 +222,6 @@ def running():
                 print(interrupt_value["generated_code"])
                 print("-" * 50)
                 
-                # Menerima input nyata dari terminal Anda
                 user_choice = input("Setujui kode ini? (y/n): ").strip().lower()
                 is_approved = user_choice == 'y'
                 feedback_msg = ""
@@ -237,6 +235,26 @@ def running():
                 }
                 
                 print("\nMelanjutkan eksekusi berdasarkan keputusan Anda...")
+                
+                # ==========================================
+                # SIMPAN KE 1 FILE TUNGGAL (Append Mode + Timestamp)
+                # ==========================================
+                if is_approved:
+                    try:
+                        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        filename = "approved_codes_history.txt"
+                        
+                        # Menggunakan mode "a" (append) agar data lama tidak tertimpa
+                        with open(filename, "a", encoding="utf-8") as f:
+                            f.write(f"\n\n{'='*60}\n")
+                            f.write(f"Waktu Disetujui: {timestamp}\n")
+                            f.write(interrupt_value["generated_code"] + "\n")
+                            f.write(f"{'='*60}\n")
+                            
+                        print(f"📁 Kode berhasil ditambahkan ke riwayat dalam file: {filename}")
+                    except Exception as e:
+                        print(f"❌ Gagal menyimpan kode ke file: {e}")
+                # ==========================================
                 
                 for event in app.stream(Command(resume=human_response), config, stream_mode="values"):
                     if "messages" in event:
