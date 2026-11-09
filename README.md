@@ -39,4 +39,4 @@ An autonomous, secure, and interactive math assistant agent built using **LangGr
 ├─> [Error] ──> [Retry < 3?] ──> [Code Writer (Auto-Fix)]
 └─> [Success] ──> [End / Print Output]
 
-# Note: This is a basic prototype that I plan to use in my future projects.
+# Note: This is just a basic prototype...
