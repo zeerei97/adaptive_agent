@@ -1,7 +1,22 @@
 
+============================================================
+Approved Time: 2026-11-09 03:01:24
+# Calculate combinations: 12 choose 4
+# Formula: n! / (k! * (n-k)!)
+combinations = math.factorial(12) // (math.factorial(4) * math.factorial(12 - 4))
+
+# Calculate GCD of 252 and 105
+gcd_value = math.gcd(252, 105)
+
+# Calculate the final result
+result = combinations + gcd_value
+
+print(result)
+============================================================
+
 
 ============================================================
-Waktu Disetujui: 2026-11-06 02:08:26
-result = math.factorial(10) - math.sqrt(10000)
+Approved Time: 2026-11-09 03:01:39
+result = (2**10 - math.factorial(6)) / math.sqrt(16)
 print(result)
 ============================================================
