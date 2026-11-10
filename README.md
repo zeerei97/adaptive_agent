@@ -44,5 +44,5 @@ graph TD
     style Check fill:#fef3c7,stroke:#d97706,stroke-width:2px
     style Executor fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
     style Writer fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
-
+```
 # Note: This is just a basic prototype...
