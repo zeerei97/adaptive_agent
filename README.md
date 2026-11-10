@@ -29,19 +29,20 @@ An autonomous, secure, and interactive math assistant agent built using **LangGr
 
 ```mermaid
 graph TD
-    User([User Input]) --> Writer[Code Writer Node <br/><i>Generates Python Code via Gemini</i>]
-    Writer --> Review{Human Review Node <br/><i>Pauses via interrupt()</i>}
+    User([User Input]) --> Writer[Code Writer Node]
+    Writer --> Review{Human Review Node}
     
-    Review -- Rejected / Feedback --> Writer
-    Review -- Approved --> Executor[Code Executor Node <br/><i>Runs in RestrictedPython Sandbox</i>]
+    Review -- "Rejected / Feedback" --> Writer
+    Review -- Approved --> Executor[Code Executor Node]
     
     Executor --> Check{Execution Status}
-    Check -- Error & Retry < 3 --> Writer
-    Check -- Error & Retry >= 3 --> MaxRetry[Max Retry Exceeded / End]
+    Check -- "Error & Retry < 3" --> Writer
+    Check -- "Error & Retry >= 3" --> MaxRetry[Max Retry Exceeded]
     Check -- Success --> SuccessNode([End / Print Output])
 
     style Review fill:#f3e8ff,stroke:#9333ea,stroke-width:2px
     style Check fill:#fef3c7,stroke:#d97706,stroke-width:2px
     style Executor fill:#e0f2fe,stroke:#0284c7,stroke-width:2px
     style Writer fill:#f0fdf4,stroke:#16a34a,stroke-width:2px
+
 # Note: This is just a basic prototype...
